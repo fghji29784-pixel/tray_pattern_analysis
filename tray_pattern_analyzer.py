@@ -361,26 +361,33 @@ def fit_trend_surface(rows, cols, z):
     return coef[1], coef[2], coef[3], r2_score, (fitted.max() - fitted.min())
 
 
+# 선형 기울기 8방향 이름 (기울기 벡터 각도 0°=오른쪽, 반시계로 45°씩)
+#   h=+오른쪽, v=+위쪽 기준. 대각선(꼭짓점) 패턴 포함.
+_DIR8 = {0: "오른쪽이 높음", 1: "오른쪽위가 높음", 2: "위쪽이 높음",
+         3: "왼쪽위가 높음", 4: "왼쪽이 높음", 5: "왼쪽아래가 높음",
+         6: "아래쪽이 높음", 7: "오른쪽아래가 높음"}
+
+
 def classify_pattern(b, c, d, r2_score):
     """구배 계수 -> 사람이 읽는 패턴 이름.
-    방향 정의: 열(col) 증가=오른쪽, 행(row) 증가=아래쪽 (히트맵 표시 기준)."""
+    방향 정의: 열(col) 증가=오른쪽, 행(row) 증가=아래쪽 (히트맵 표시 기준).
+    선형 기울기가 우세하면 8방향(축4+대각선4), 곡률이 우세하면 중앙/외곽."""
     if r2_score < PATTERN_R2_MIN:
         return "뚜렷한 패턴 없음(균일)"
 
-    # 각 형태항이 만드는 공간 변동 크기로 우세항 결정
     xs = np.arange(GRID) - 5.5
-    var_x = np.var(b * xs)
-    var_y = np.var(c * xs)
-    r2grid = (xs[:, None] ** 2 + xs[None, :] ** 2)
-    var_r = np.var(d * (r2grid - r2grid.mean()))
+    X, Y = np.meshgrid(xs, xs)        # X=열(오른쪽+), Y=행(아래쪽+)
+    var_lin = np.var(b * X + c * Y)   # 선형 기울기(대각선 포함)가 만드는 변동
+    r2grid = X ** 2 + Y ** 2
+    var_rad = np.var(d * (r2grid - r2grid.mean()))  # 곡률(중앙/외곽)이 만드는 변동
 
-    dom = np.argmax([var_x, var_y, var_r])
-    if dom == 0:
-        return "오른쪽이 높음" if b > 0 else "왼쪽이 높음"
-    elif dom == 1:
-        return "아래쪽이 높음" if c > 0 else "위쪽이 높음"
-    else:
+    if var_rad >= var_lin:            # 곡률 우세 → 방사형
         return "바깥(외곽)이 높음" if d > 0 else "가운데(중앙)가 높음"
+
+    # 선형 우세 → 기울기 벡터 각도로 8방향. h=오른쪽+, v=위쪽+(c>0=아래高 이므로 v=-c)
+    ang = np.degrees(np.arctan2(-c, b))
+    sector = int(round(ang / 45.0)) % 8
+    return _DIR8[sector]
 
 
 def robust_outlier_mask(values, k=OUTLIER_K):
