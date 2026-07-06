@@ -86,12 +86,16 @@ def load_data(path):
     df = pd.read_excel(path, engine="openpyxl")
     df.columns = [str(c).strip() for c in df.columns]
 
-    missing = [v for v in COL.values() if v not in df.columns]
-    if missing:
-        print("[경고] 다음 컬럼을 찾지 못했습니다 (이름을 확인하세요):")
-        for m in missing:
+    optional = {"st1", "st2", "st3", "cellpos", "label"}  # 없어도 분석 가능
+    req_missing = [COL[k] for k in COL if k not in optional and COL[k] not in df.columns]
+    opt_missing = [COL[k] for k in optional if COL[k] not in df.columns]
+    if req_missing:
+        print("[경고] 분석에 꼭 필요한 컬럼을 찾지 못했습니다 (이름 확인 필요):")
+        for m in req_missing:
             print("   -", m)
         print("발견된 컬럼:", list(df.columns))
+    if opt_missing:
+        print("[정보] 선택 컬럼이 없어 해당 부분만 생략합니다:", opt_missing)
     return df
 
 
@@ -185,17 +189,26 @@ def quality_filter(df):
 
 def tray_key(df):
     """랏-트레이 복합키 문자열."""
-    return df[COL["lot"]].astype(str) + " ▸ " + df[COL["tray"]].astype(str)
+    return df[COL["lot"]].astype(str) + " / " + df[COL["tray"]].astype(str)
 
 
 # ══════════════════════════════════════════════════════════════════════
 #  Phase 1 : 4개 축 관계 매트릭스
 # ══════════════════════════════════════════════════════════════════════
 def build_time_features(df):
-    """측정 시각 -> 경과시간(시간). 파싱 실패시 NaN."""
+    """측정 시각 -> 경과시간(시간). 시간 컬럼이 없거나 파싱 실패하면 NaN.
+    (시간은 관계표의 참고지표로만 쓰이므로 없어도 전체 분석은 정상 동작)."""
+    have_time = all(COL[k] in df.columns for k in ["st1", "st3"])
     for k in ["st1", "st2", "st3"]:
-        df[k + "_dt"] = pd.to_datetime(df[COL[k]], errors="coerce")
-    df["경과시간_1to3(h)"] = (df["st3_dt"] - df["st1_dt"]).dt.total_seconds() / 3600.0
+        if COL[k] in df.columns:
+            df[k + "_dt"] = pd.to_datetime(df[COL[k]], errors="coerce")
+        else:
+            df[k + "_dt"] = pd.NaT
+    if have_time and df["st1_dt"].notna().any() and df["st3_dt"].notna().any():
+        df["경과시간_1to3(h)"] = (df["st3_dt"] - df["st1_dt"]).dt.total_seconds() / 3600.0
+    else:
+        df["경과시간_1to3(h)"] = np.nan
+        print("[정보] 측정 시각 컬럼이 없거나 비어 있음 → '경과시간'은 생략(나머지 분석 정상).")
     return df
 
 
@@ -444,16 +457,22 @@ def plot_pattern_cards(df, value_col, pat_df, keys, outpath, title, unit=""):
 
 
 def plot_exclusion(report, outpath):
+    """제외 리포트: 라벨/값을 두 위치에 배치해 한글이어도 정렬 유지(monospace 미사용)."""
     fig, ax = plt.subplots(figsize=(8, 4.5))
     ax.axis("off")
-    lines = ["◆ 데이터 정리 결과 (분석에서 뺀 셀)\n"]
-    for k, v in report.items():
-        lines.append("  {:<28s} : {:,} 셀".format(k, v))
+    ax.set_xlim(0, 1); ax.set_ylim(0, 1)
+    ax.text(0.03, 0.94, "◆ 데이터 정리 결과 (분석에서 뺀 셀)", fontsize=13,
+            fontweight="bold", va="top")
+    items = list(report.items())
+    y = 0.80
+    for k, v in items:
+        ax.text(0.05, y, str(k), fontsize=12, va="top", ha="left")
+        ax.text(0.95, y, "{:,} 셀".format(v), fontsize=12, va="top", ha="right")
+        y -= 0.095
     keep = report.get("분석 대상", 0)
     tot = report.get("전체 셀", 1)
-    lines.append("\n  → 전체의 %.1f%% 를 분석에 사용" % (100 * keep / tot))
-    ax.text(0.02, 0.98, "\n".join(lines), va="top", ha="left",
-            fontsize=12, family="monospace")
+    ax.text(0.05, y - 0.02, "→ 전체의 %.1f%% 를 분석에 사용" % (100 * keep / tot),
+            fontsize=12, va="top", color="#1f77b4", fontweight="bold")
     fig.tight_layout()
     fig.savefig(outpath, dpi=130)
     plt.close(fig)
