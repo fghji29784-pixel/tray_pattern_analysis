@@ -1,0 +1,10 @@
+# 결과물 / 임시
+results/
+_tmp/
+__pycache__/
+*.pyc
+
+# 데이터 (원본 엑셀은 올리지 않음)
+*.xlsx
+*.xls
+*.csv
