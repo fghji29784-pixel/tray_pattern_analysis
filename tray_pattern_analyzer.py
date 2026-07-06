@@ -84,6 +84,8 @@ N_CELLS = GRID * GRID     # 144
 TEMP_MIN = 22.0           # 22℃ 미만 = 센서오류로 간주하여 제외
 MIN_VALID_CELLS = 100     # 트레이당 유효셀이 이보다 적으면 패턴분석 제외
 PATTERN_R2_MIN = 0.15     # 구배 설명력이 이보다 낮으면 '패턴 약함(균일)'
+PATTERN_R2_STRONG = 0.30  # 이 이상이면 '강한(신뢰할 만한) 패턴'으로 별도 집계
+RADIAL_MARGIN = 1.3       # 방사형(중앙/외곽)은 선형보다 이 배 이상 우세할 때만 인정
 OUTLIER_K = 3.5           # 트레이 내 튀는 셀(이상치) 판정: |값-중앙값| > K·MAD
 DEFECT_LABELS = {"E", "NG", "불량"}   # 불량 등급 표기(있으면 색칠에만 사용)
 
@@ -381,7 +383,7 @@ def classify_pattern(b, c, d, r2_score):
     r2grid = X ** 2 + Y ** 2
     var_rad = np.var(d * (r2grid - r2grid.mean()))  # 곡률(중앙/외곽)이 만드는 변동
 
-    if var_rad >= var_lin:            # 곡률 우세 → 방사형
+    if var_rad >= RADIAL_MARGIN * var_lin:   # 곡률이 '확실히' 우세할 때만 방사형
         return "바깥(외곽)이 높음" if d > 0 else "가운데(중앙)가 높음"
 
     # 선형 우세 → 기울기 벡터 각도로 8방향. h=오른쪽+, v=위쪽+(c>0=아래高 이므로 v=-c)
@@ -465,6 +467,15 @@ def pattern_counts(pat_df):
     return out.reset_index().rename(columns={"index": "패턴"})
 
 
+def strong_summary(pat_df, thr=PATTERN_R2_STRONG):
+    """강한 패턴(R²≥thr) 트레이 수 / 분석가능 트레이 수 반환.
+    (신호가 약한지 = 과대분류 여부를 판단하는 지표)"""
+    a = pat_df[pat_df["패턴"] != "데이터 부족"]
+    n = len(a)
+    strong = int((a["설명력R2"] >= thr).sum())
+    return strong, n
+
+
 def plot_pattern_menu(count_df, title, outpath, unit=""):
     order = count_df.sort_values("트레이 수", ascending=True)
     fig, ax = plt.subplots(figsize=(9, max(3.5, 0.6 * len(order) + 2)))
@@ -495,14 +506,20 @@ def plot_pattern_cards(df, value_col, pat_df, keys, outpath, title, unit=""):
                              squeeze=False)
     for k, cat in enumerate(cats):
         ax = axes[k // ncol][k % ncol]
-        # 이 패턴에서 설명력 가장 큰 트레이를 대표로
         sub = pat_df[pat_df["패턴"] == cat].sort_values("설명력R2", ascending=False)
-        rep = sub.iloc[0]["랏-트레이"]
+        if cat.startswith("뚜렷한 패턴 없음"):
+            rep_row = sub.iloc[len(sub) // 2]      # 균일: 중앙값 트레이(진짜 평평한 예)
+        else:
+            rep_row = sub.iloc[0]                  # 그 외: 가장 뚜렷한(R² 최고) 예
+        rep = rep_row["랏-트레이"]
+        r2 = rep_row.get("설명력R2", np.nan)
+        mag = rep_row.get("구배크기", np.nan)
         g = df[df["_tray"] == rep]
         grid = tray_grid(g, value_col, mask_outliers=True)  # 튀는 셀 제거
         vmin, vmax = robust_clim(grid)
         im = ax.imshow(grid, cmap="coolwarm", origin="upper", vmin=vmin, vmax=vmax)
-        ax.set_title("%s\n(대표: %s)" % (cat, str(rep)[:24]), fontsize=9)
+        ax.set_title("%s\nR²=%.2f · 세기=%.2f\n(%s)" % (cat, r2, mag, str(rep)[:18]),
+                     fontsize=8)
         ax.set_xticks([0, 11]); ax.set_xticklabels(["왼쪽", "오른쪽"], fontsize=7)
         ax.set_yticks([0, 11]); ax.set_yticklabels(["위", "아래"], fontsize=7)
         fig.colorbar(im, ax=ax, shrink=0.7)
@@ -745,7 +762,9 @@ def main():
     for name, k, _ in TIMEPOINTS:
         pat[name] = per_tray_patterns(df, k, keys)
         cnt[name] = pattern_counts(pat[name])
-        print("\n   [%s 온도 패턴]" % name)
+        s, tot = strong_summary(pat[name])
+        print("\n   [%s 온도 패턴]  강한패턴(R²≥%.2f): %d/%d (%.1f%%)"
+              % (name, PATTERN_R2_STRONG, s, tot, 100 * s / max(tot, 1)))
         print(cnt[name].to_string(index=False))
 
     pattern_compare_over_time(cnt, os.path.join(args.outdir,
@@ -777,7 +796,9 @@ def main():
     # ΔOCV 패턴 ------------------------------------------------------
     pat_ocv = per_tray_patterns(df, "docv", keys)
     cnt_ocv = pattern_counts(pat_ocv)
-    print("\n   [ΔOCV 패턴]")
+    s_ocv, tot_ocv = strong_summary(pat_ocv)
+    print("\n   [ΔOCV 패턴]  강한패턴(R²≥%.2f): %d/%d (%.1f%%)"
+          % (PATTERN_R2_STRONG, s_ocv, tot_ocv, 100 * s_ocv / max(tot_ocv, 1)))
     print(cnt_ocv.to_string(index=False))
     plot_pattern_menu(cnt_ocv, "⑧ ΔOCV 패턴별 트레이 개수",
                       os.path.join(args.outdir, "08_OCV패턴.png"))
