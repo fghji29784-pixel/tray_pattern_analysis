@@ -37,11 +37,24 @@ import matplotlib
 matplotlib.use("Agg")  # 화면 없이 파일 저장
 import matplotlib.pyplot as plt
 
-# 한글 폰트 (Windows 기본)
-try:
-    plt.rcParams["font.family"] = "Malgun Gothic"
-except Exception:
-    pass
+# 한글 폰트: 설치된 것 중 첫 번째를 자동 선택 (환경마다 이름이 달라 깨지는 문제 방지)
+def _set_korean_font():
+    import matplotlib.font_manager as fm
+    candidates = ["Malgun Gothic", "NanumGothic", "NanumBarunGothic", "Nanum Gothic",
+                  "Gulim", "Dotum", "Batang", "Gungsuh", "AppleGothic",
+                  "Noto Sans CJK KR", "Noto Sans KR", "Source Han Sans KR"]
+    available = {f.name for f in fm.fontManager.ttflist}
+    for c in candidates:
+        if c in available:
+            plt.rcParams["font.family"] = c
+            plt.rcParams["font.sans-serif"] = [c] + plt.rcParams.get("font.sans-serif", [])
+            print("[폰트] 한글 폰트 사용:", c)
+            return c
+    print("[폰트][경고] 한글 폰트를 찾지 못했습니다 → 한글이 깨질 수 있습니다.")
+    print("           설치된 폰트 예:", sorted(available)[:10])
+    return None
+
+_set_korean_font()
 plt.rcParams["axes.unicode_minus"] = False
 
 
@@ -71,6 +84,7 @@ N_CELLS = GRID * GRID     # 144
 TEMP_MIN = 22.0           # 22℃ 미만 = 센서오류로 간주하여 제외
 MIN_VALID_CELLS = 100     # 트레이당 유효셀이 이보다 적으면 패턴분석 제외
 PATTERN_R2_MIN = 0.15     # 구배 설명력이 이보다 낮으면 '패턴 약함(균일)'
+OUTLIER_K = 3.5           # 트레이 내 튀는 셀(이상치) 판정: |값-중앙값| > K·MAD
 DEFECT_LABELS = {"E", "NG", "불량"}   # 불량 등급 표기(있으면 색칠에만 사용)
 
 # 측정 시점과 온도컬럼, 화면 표기(경과일). OCV1 → +2일 → OCV2 → +1일 → OCV3
@@ -369,26 +383,65 @@ def classify_pattern(b, c, d, r2_score):
         return "바깥(외곽)이 높음" if d > 0 else "가운데(중앙)가 높음"
 
 
+def robust_outlier_mask(values, k=OUTLIER_K):
+    """MAD 기반 이상치(튀는 셀) 마스크. True=이상치. (median/MAD는 이상치에 강건)"""
+    v = np.asarray(values, dtype=float)
+    med = np.nanmedian(v)
+    mad = np.nanmedian(np.abs(v - med))
+    if not np.isfinite(mad) or mad <= 0:
+        return np.zeros_like(v, dtype=bool)
+    z = np.abs(v - med) / (1.4826 * mad)
+    return z > k
+
+
+def tray_grid(g, value_col, mask_outliers=True):
+    """트레이 12x12 격자 값. mask_outliers=True면 튀는 셀은 NaN(흰색)으로 제거."""
+    grid = np.full((GRID, GRID), np.nan)
+    for _, r in g.iterrows():
+        if not (np.isnan(r["row"]) or np.isnan(r["col"])):
+            grid[int(r["row"]), int(r["col"])] = r[value_col]
+    if mask_outliers:
+        flat = grid.flatten()
+        flat[robust_outlier_mask(flat)] = np.nan
+        grid = flat.reshape(GRID, GRID)
+    return grid
+
+
+def robust_clim(grid):
+    """튀는 셀에 눈금이 먹히지 않도록 2~98 백분위로 색 범위 설정."""
+    finite = grid[np.isfinite(grid)]
+    if finite.size < 3:
+        return None, None
+    lo, hi = np.nanpercentile(finite, [2, 98])
+    if lo == hi:
+        return None, None
+    return lo, hi
+
+
 def per_tray_patterns(df, value_col, keys):
-    """트레이별 구배계수·패턴 표 반환."""
+    """트레이별 구배계수·패턴 표 반환. 튀는 셀(이상치)은 구배 피팅 전에 제거."""
     df = df.copy()
     df["_tray"] = keys.values
     recs = []
     for tray, g in df.groupby("_tray"):
         g = g.dropna(subset=[value_col, "row", "col"])
         if len(g) < MIN_VALID_CELLS:
-            recs.append({"랏-트레이": tray, "유효셀": len(g),
+            recs.append({"랏-트레이": tray, "유효셀": len(g), "이상셀수": 0,
                          "패턴": "데이터 부족", "b_좌우": np.nan,
                          "c_상하": np.nan, "d_중앙외곽": np.nan,
                          "설명력R2": np.nan, "구배크기": np.nan})
             continue
+        # 튀는 셀 제거 후 구배 피팅 (한 셀 때문에 패턴이 안 보이는 문제 방지)
+        vals = g[value_col].values.astype(float)
+        out = robust_outlier_mask(vals)
+        gg = g[~out]
         b, c, d, r2s, rng = fit_trend_surface(
-            g["row"].values.astype(float),
-            g["col"].values.astype(float),
-            g[value_col].values.astype(float),
+            gg["row"].values.astype(float),
+            gg["col"].values.astype(float),
+            gg[value_col].values.astype(float),
         )
         recs.append({
-            "랏-트레이": tray, "유효셀": len(g),
+            "랏-트레이": tray, "유효셀": len(g), "이상셀수": int(out.sum()),
             "패턴": classify_pattern(b, c, d, r2s),
             "b_좌우": b, "c_상하": c, "d_중앙외곽": d,
             "설명력R2": r2s, "구배크기": rng,
@@ -439,11 +492,9 @@ def plot_pattern_cards(df, value_col, pat_df, keys, outpath, title, unit=""):
         sub = pat_df[pat_df["패턴"] == cat].sort_values("설명력R2", ascending=False)
         rep = sub.iloc[0]["랏-트레이"]
         g = df[df["_tray"] == rep]
-        grid = np.full((GRID, GRID), np.nan)
-        for _, r in g.iterrows():
-            if not (np.isnan(r["row"]) or np.isnan(r["col"])):
-                grid[int(r["row"]), int(r["col"])] = r[value_col]
-        im = ax.imshow(grid, cmap="coolwarm", origin="upper")
+        grid = tray_grid(g, value_col, mask_outliers=True)  # 튀는 셀 제거
+        vmin, vmax = robust_clim(grid)
+        im = ax.imshow(grid, cmap="coolwarm", origin="upper", vmin=vmin, vmax=vmax)
         ax.set_title("%s\n(대표: %s)" % (cat, str(rep)[:24]), fontsize=9)
         ax.set_xticks([0, 11]); ax.set_xticklabels(["왼쪽", "오른쪽"], fontsize=7)
         ax.set_yticks([0, 11]); ax.set_yticklabels(["위", "아래"], fontsize=7)
@@ -613,11 +664,10 @@ def plot_tray_evolution(df, keys, pat3, outpath, n_examples=3):
         g = df[df["_tray"] == tray]
         for ci, (name, col) in enumerate(fields):
             ax = axes[ri][ci]
-            grid = np.full((GRID, GRID), np.nan)
-            for _, rr in g.iterrows():
-                if not (np.isnan(rr["row"]) or np.isnan(rr["col"])):
-                    grid[int(rr["row"]), int(rr["col"])] = rr[col]
-            im = ax.imshow(grid, cmap="coolwarm", origin="upper")
+            grid = tray_grid(g, col, mask_outliers=True)  # 튀는 셀 제거
+            vmin, vmax = robust_clim(grid)
+            im = ax.imshow(grid, cmap="coolwarm", origin="upper",
+                           vmin=vmin, vmax=vmax)
             if ri == 0:
                 ax.set_title(name, fontsize=10)
             if ci == 0:
@@ -701,6 +751,13 @@ def main():
     plot_tray_evolution(df, keys, pat["OCV3"],
                         os.path.join(args.outdir, "09_트레이_시간진화_예시.png"))
 
+    # 시점별 온도 패턴 대표 트레이 카드 (OCV 대표트레이의 온도 버전)
+    for i, (name, k, _) in enumerate(TIMEPOINTS):
+        plot_pattern_cards(
+            df, k, pat[name], keys,
+            os.path.join(args.outdir, "1%d_온도패턴_대표트레이_%s.png" % (i + 1, name)),
+            "온도(%s) 패턴별 대표 트레이 (12x12, 튀는 셀 제거)" % name)
+
     # 냉각량(T1-T3) 패턴 ---------------------------------------------
     df["_cool"] = df["t1"] - df["t3"]
     pat_cool = per_tray_patterns(df, "_cool", keys)
@@ -719,7 +776,7 @@ def main():
                       os.path.join(args.outdir, "08_OCV패턴.png"))
     plot_pattern_cards(df, "docv", pat_ocv, keys,
                        os.path.join(args.outdir, "10_OCV패턴_대표트레이.png"),
-                       "ΔOCV 패턴별 대표 트레이 (12x12)")
+                       "ΔOCV 패턴별 대표 트레이 (12x12, 튀는 셀 제거)")
 
     # 냉각패턴 vs OCV패턴 겹침 (냉각이 큰 곳에서 OCV도 튀나) -----------
     merged = pd.merge(
@@ -750,7 +807,7 @@ def main():
 
     print("\n" + "=" * 60)
     print(" 완료. 결과 폴더:", os.path.abspath(args.outdir))
-    print("   - PNG 9장 + 요약 Excel(패턴분석_요약.xlsx)")
+    print("   - PNG 12장 + 요약 Excel(패턴분석_요약.xlsx)")
     print("=" * 60)
 
 
