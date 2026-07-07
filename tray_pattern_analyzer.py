@@ -706,6 +706,85 @@ def plot_tray_evolution(df, keys, pat3, outpath, n_examples=3):
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  ΔOCV 패턴 vs 온도 패턴 : 트렌드가 일치하나?
+# ══════════════════════════════════════════════════════════════════════
+def plot_ocv_temp_alignment(pat_ocv, pat_t, outpath):
+    """ΔOCV 구배 방향과 온도(T1/T2/T3) 구배 방향의 정렬도(코사인).
+    강한 ΔOCV 트레이만 대상. +1=같은방향, 0=무관, -1=반대."""
+    strong = pat_ocv[(pat_ocv["패턴"] != "데이터 부족") &
+                     (pat_ocv["설명력R2"] >= PATTERN_R2_STRONG)]
+    strong = strong[["랏-트레이", "b_좌우", "c_상하"]].rename(
+        columns={"b_좌우": "bo", "c_상하": "co"})
+    results = {}
+    for name in ["OCV1", "OCV2", "OCV3"]:
+        t = pat_t[name][["랏-트레이", "b_좌우", "c_상하"]].rename(
+            columns={"b_좌우": "bt", "c_상하": "ct"})
+        m = strong.merge(t, on="랏-트레이")
+        dot = m["bo"] * m["bt"] + m["co"] * m["ct"]
+        denom = np.sqrt(m["bo"]**2 + m["co"]**2) * np.sqrt(m["bt"]**2 + m["ct"]**2)
+        cos = (dot / denom).replace([np.inf, -np.inf], np.nan).dropna()
+        results[name] = cos
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    labels = list(results.keys())
+    means = [results[k].mean() if len(results[k]) else 0 for k in labels]
+    ax.bar(labels, means, color=["#1f77b4", "#ff7f0e", "#2ca02c"])
+    for i, mv in enumerate(means):
+        ax.text(i, mv, "%.2f" % mv, ha="center",
+                va="bottom" if mv >= 0 else "top", fontsize=11)
+    ax.axhline(0, color="k", lw=0.8)
+    ax.set_ylim(-1, 1)
+    ax.set_ylabel("구배 방향 정렬도 (코사인)")
+    ax.set_title("⑭ ΔOCV 구배와 온도 구배가 같은 방향인가?\n"
+                 "+1=같은방향 · 0=무관 · −1=반대  |  0 근처면 온도가 ΔOCV패턴을 설명 못함",
+                 fontsize=11)
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=130)
+    plt.close(fig)
+    return {k: (float(v.mean()) if len(v) else float("nan"), int(len(v)))
+            for k, v in results.items()}
+
+
+def plot_ocv_vs_temp_cards(df, keys, pat_ocv, outpath, max_rows=8):
+    """강한 ΔOCV 패턴 대표트레이의 ΔOCV / 온도1/2/3 를 나란히 (모양 비교)."""
+    df = df.copy()
+    df["_tray"] = keys.values
+    cats = pat_ocv[pat_ocv["패턴"] != "데이터 부족"]
+    reps = []
+    for cat in cats["패턴"].unique():
+        sub = cats[cats["패턴"] == cat].sort_values("설명력R2", ascending=False)
+        if sub.iloc[0]["설명력R2"] >= PATTERN_R2_STRONG:
+            reps.append((cat, sub.iloc[0]["랏-트레이"], sub.iloc[0]["설명력R2"]))
+    reps.sort(key=lambda r: -r[2])
+    reps = reps[:max_rows]
+    if not reps:
+        return
+    cols = [("ΔOCV", "docv"), ("온도 OCV1", "t1"),
+            ("온도 OCV2", "t2"), ("온도 OCV3", "t3")]
+    fig, axes = plt.subplots(len(reps), 4, figsize=(15, 3.4 * len(reps)),
+                             squeeze=False)
+    for ri, (cat, tray, r2) in enumerate(reps):
+        g = df[df["_tray"] == tray]
+        for ci, (cname, col) in enumerate(cols):
+            ax = axes[ri][ci]
+            grid = tray_grid(g, col, mask_outliers=True)
+            vmin, vmax = robust_clim(grid)
+            im = ax.imshow(grid, cmap="coolwarm", origin="upper",
+                           vmin=vmin, vmax=vmax)
+            if ri == 0:
+                ax.set_title(cname, fontsize=11)
+            if ci == 0:
+                ax.set_ylabel("%s\nR²=%.2f" % (cat, r2), fontsize=8)
+            ax.set_xticks([]); ax.set_yticks([])
+            fig.colorbar(im, ax=ax, shrink=0.7)
+    fig.suptitle("⑮ ΔOCV 패턴별 대표트레이: ΔOCV vs 온도1/2/3 (왼쪽 ΔOCV와 오른쪽 온도들이 닮았나?)",
+                 fontsize=13)
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    fig.savefig(outpath, dpi=130)
+    plt.close(fig)
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  메인
 # ══════════════════════════════════════════════════════════════════════
 def main():
@@ -806,6 +885,16 @@ def main():
                        os.path.join(args.outdir, "10_OCV패턴_대표트레이.png"),
                        "ΔOCV 패턴별 대표 트레이 (12x12, 튀는 셀 제거)")
 
+    # ΔOCV 패턴 vs 온도 트렌드 일치 여부 -----------------------------
+    align = plot_ocv_temp_alignment(pat_ocv, pat,
+                                    os.path.join(args.outdir, "14_OCV_온도_정렬도.png"))
+    print("\n   ΔOCV 구배 vs 온도 구배 정렬도(코사인, 강한ΔOCV %d트레이):"
+          % (align["OCV1"][1]))
+    for nm in ["OCV1", "OCV2", "OCV3"]:
+        print("      %s: %.2f" % (nm, align[nm][0]))
+    plot_ocv_vs_temp_cards(df, keys, pat_ocv,
+                           os.path.join(args.outdir, "15_OCV패턴별_온도비교.png"))
+
     # 냉각패턴 vs OCV패턴 겹침 (냉각이 큰 곳에서 OCV도 튀나) -----------
     merged = pd.merge(
         pat_cool[["랏-트레이", "패턴"]].rename(columns={"패턴": "냉각패턴"}),
@@ -835,7 +924,7 @@ def main():
 
     print("\n" + "=" * 60)
     print(" 완료. 결과 폴더:", os.path.abspath(args.outdir))
-    print("   - PNG 12장 + 요약 Excel(패턴분석_요약.xlsx)")
+    print("   - PNG 15장 + 요약 Excel(패턴분석_요약.xlsx)")
     print("=" * 60)
 
 
