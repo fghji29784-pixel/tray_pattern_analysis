@@ -833,6 +833,106 @@ def ocv_temp_correlation(df, keys, outpath):
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  검증 & 구배 제거(detrend)
+# ══════════════════════════════════════════════════════════════════════
+def verify_docv(df):
+    """ΔOCV 컬럼이 정말 OCV1-OCV3 인지 검증 (정의 불일치 조기 발견)."""
+    calc = df["ocv1"] - df["ocv3"]
+    diff = (df["docv"] - calc).abs()
+    n_bad = int((diff > 0.01).sum())
+    print("[검증] ΔOCV 컬럼 vs (OCV1-OCV3): 중앙값차=%.4f, 최대차=%.4f, "
+          "불일치(>0.01) %d셀" % (diff.median(), diff.max(), n_bad))
+    if n_bad > len(df) * 0.01:
+        print("   ⚠ ΔOCV 정의가 OCV1-OCV3가 아닐 수 있습니다. 컬럼 정의 확인 필요!")
+
+
+def time_order_diagnostic(df, keys):
+    """트레이 내 측정시각 산포 진단: 셀별 순차측정이면 '시각=위치' 교란 가능."""
+    if not df["st1_dt"].notna().any():
+        print("[시각진단] 측정시각 없음 → 생략")
+        return
+    span = df.groupby(keys.values)["st1_dt"].agg(lambda s: (s.max() - s.min()).total_seconds())
+    med = float(span.median())
+    print("[시각진단] 트레이 내 OCV1 시각 산포(중앙값): %.1f초" % med)
+    if med < 1:
+        print("   → 트레이 단위 일괄측정: 측정순서로 인한 위치 교란 없음")
+    else:
+        print("   ⚠ 셀별 순차측정 흔적: '위치 구배'가 측정순서(완화 진행차)일 수 있음")
+
+
+def detrend_docv(df, keys, outdir):
+    """트레이별 트렌드면(구배)을 빼서 보정 ΔOCV 산출.
+    보정값 = (ΔOCV - 트렌드면) + 트레이중앙값  → 구배만 제거, 스케일 유지.
+    셀별 결과 CSV 저장 + 전/후 비교 그림([17])."""
+    df = df.copy()
+    df["_tray"] = keys.values
+    corrected = np.full(len(df), np.nan)
+    trend_all = np.full(len(df), np.nan)
+    rec_before, rec_after = [], []
+
+    for tray, g in df.groupby("_tray"):
+        idx = g.index
+        v = g["docv"].values.astype(float)
+        r = g["row"].values.astype(float)
+        c = g["col"].values.astype(float)
+        med = np.nanmedian(v)
+        if len(g) < MIN_VALID_CELLS:
+            corrected[df.index.get_indexer(idx)] = v - med + med
+            continue
+        out = robust_outlier_mask(v)
+        # 이상치 제외하고 트렌드면 피팅 → 전체 셀에 트렌드 적용
+        b, cc, d, r2b, rngb = fit_trend_surface(r[~out], c[~out], v[~out])
+        x = c - 5.5; y = r - 5.5
+        r2t = x * x + y * y
+        trend = b * x + cc * y + d * (r2t - r2t.mean())
+        resid = v - trend
+        pos = df.index.get_indexer(idx)
+        corrected[pos] = resid            # 트렌드 제거(중앙값은 resid에 포함됨)
+        trend_all[pos] = trend
+        # 전/후 구배 세기 (검증: 후는 0 근처여야 함)
+        _, _, _, r2a, rnga = fit_trend_surface(r[~out], c[~out], resid[~out])
+        rec_before.append((r2b, rngb)); rec_after.append((r2a, rnga))
+
+    df["ΔOCV_트렌드"] = trend_all
+    df["ΔOCV_보정"] = corrected
+
+    # 전/후 비교 그림
+    rb = np.array(rec_before); ra = np.array(rec_after)
+    sb = int((rb[:, 0] >= PATTERN_R2_STRONG).sum())
+    sa = int((ra[:, 0] >= PATTERN_R2_STRONG).sum())
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    ax = axes[0]
+    ax.bar(["보정 전", "보정 후"], [sb, sa], color=["#d1495b", "#66a182"])
+    for i, v_ in enumerate([sb, sa]):
+        ax.text(i, v_, "%d개" % v_, ha="center", va="bottom", fontsize=12)
+    ax.set_ylabel("강한 구배(R²≥%.2f) 트레이 수" % PATTERN_R2_STRONG)
+    ax.set_title("구배 있는 트레이가 사라졌나")
+    ax2 = axes[1]
+    ax2.hist(rb[:, 1], bins=40, alpha=0.6, label="보정 전", color="#d1495b")
+    ax2.hist(ra[:, 1], bins=40, alpha=0.6, label="보정 후", color="#66a182")
+    ax2.set_xlabel("트레이 구배 세기 (ΔOCV 단위)")
+    ax2.set_ylabel("트레이 수")
+    ax2.legend()
+    ax2.set_title("구배 세기 분포 (0으로 몰리면 성공)")
+    fig.suptitle("[17] 구배 제거(detrend) 효과: ΔOCV → ΔOCV_보정", fontsize=13)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    fig.savefig(os.path.join(outdir, "17_구배제거_효과.png"), dpi=130)
+    plt.close(fig)
+
+    # 셀별 결과 저장 (CSV, 엑셀에서 바로 열림)
+    out_cols = ["_tray", COL["cellno"], "row", "col", "docv",
+                "ΔOCV_트렌드", "ΔOCV_보정"]
+    if COL["label"] in df.columns:
+        out_cols.insert(2, COL["label"])
+    csv_path = os.path.join(outdir, "셀별_ΔOCV_보정.csv")
+    df[out_cols].rename(columns={"_tray": "랏-트레이", "docv": "ΔOCV_원본"}) \
+        .to_csv(csv_path, index=False, encoding="utf-8-sig")
+    print("[detrend] 강한구배 트레이 %d → %d개, 셀별 보정값: %s"
+          % (sb, sa, csv_path))
+    return df
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  메인
 # ══════════════════════════════════════════════════════════════════════
 def main():
@@ -859,6 +959,8 @@ def main():
     plot_exclusion(report, os.path.join(args.outdir, "01_제외리포트.png"))
 
     df = build_time_features(df)
+    verify_docv(df)
+    time_order_diagnostic(df, keys)
 
     # Phase 1 ---------------------------------------------------------
     print("\n[Phase 1] 관계 매트릭스")
@@ -951,6 +1053,10 @@ def main():
     print("\n   [각 OCV × 각 온도 상관 (트레이 내)]")
     print(corr_ot.round(2).to_string())
 
+    # 구배 제거(detrend) → 보정 ΔOCV 산출 -----------------------------
+    print("\n[Phase 5] 구배 제거(detrend)")
+    detrend_docv(df, keys, args.outdir)
+
     # 냉각패턴 vs OCV패턴 겹침 (냉각이 큰 곳에서 OCV도 튀나) -----------
     merged = pd.merge(
         pat_cool[["랏-트레이", "패턴"]].rename(columns={"패턴": "냉각패턴"}),
@@ -983,7 +1089,7 @@ def main():
 
     print("\n" + "=" * 60)
     print(" 완료. 결과 폴더:", os.path.abspath(args.outdir))
-    print("   - PNG 16장 + 요약 Excel(패턴분석_요약.xlsx)")
+    print("   - PNG 17장 + 요약 Excel + 셀별_ΔOCV_보정.csv")
     print("=" * 60)
 
 
