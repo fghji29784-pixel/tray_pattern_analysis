@@ -20,6 +20,10 @@ OCV1 → **(+2일)** → OCV2 → **(+1일)** → OCV3. 세 시점 온도(T1/T2/
 필수: `Lot ID`, `TRAY ID_Charge #05`, `CELL NO_Charge #05`,
 `Delta OCV_Delta OCV #07`, `OCV_PRIVT OCV #01~03`, `PRIVT OCV #01~03 온도`
 선택(없어도 동작): `Start Time_PRIVT OCV #01~03`(시간), `Cell 위치`, `판정등급`
+전공정(있으면 열이력/완화 분석 활성): `DisCharge #07 최저/평균/최고 온도`,
+`OCV #07 OCV`(방전 직후 OCV=OCV0), `OCV #07 시작시간`
+
+공정 순서: **방전7 → (직후) OCV7 → 1일 → OCV1 → 2일 → OCV2 → 1일 → OCV3**
 
 ## 실행
 ```bash
@@ -36,6 +40,8 @@ python tray_pattern_analyzer.py --input "데이터.xlsx" --outdir "results"
 | Phase 2b | **시간에 따른 온도 변화**(냉각커브·분포) |
 | Phase 3 | 시점별 패턴 분류 → **패턴별 트레이 개수** + 시간변화/유지 + 냉각량 패턴 |
 | Phase 4 | ΔOCV vs 온도 **트렌드 일치(정렬도)** + **OCV×온도 상관** |
+| Phase 5 | **구배 제거(detrend)** → 보정 ΔOCV 산출(셀별 CSV) |
+| Phase 6 | 전공정(방전7)+OCV7 **열이력/완화 분석** (선택 컬럼 있을 때) |
 
 ## 산출물 (results/) — PNG 16장 + Excel
 | 파일 | 내용 |
@@ -54,7 +60,15 @@ python tray_pattern_analyzer.py --input "데이터.xlsx" --outdir "results"
 | `14_OCV_온도_정렬도.png` | **ΔOCV 구배 vs 온도1/2/3·냉각량 구배 방향 일치도(코사인)** |
 | `15_OCV패턴별_온도비교.png` | ΔOCV 대표트레이의 ΔOCV/온도1/2/3/온도변화량 나란히 |
 | `16_OCV_온도_상관.png` | **각 OCV × 각 온도 상관(트레이 내, 평균제거)** |
-| `패턴분석_요약.xlsx` | 위 전부 + 트레이별 구배계수·강한패턴·정렬도·상관 |
+| `17_구배제거_효과.png` | detrend 전/후 구배 세기·강한구배 트레이 수 |
+| `셀별_ΔOCV_보정.csv` | 셀별 원본/트렌드/**보정 ΔOCV** (선별 입력용) |
+| `18_방전Tmax패턴.png` | (Phase 6) 방전 최고온도 공간 패턴 |
+| `19_방전_정렬도.png` | (Phase 6) ΔOCV 구배 vs 방전온도·OCV7·완화 방향 일치도 |
+| `20_OCV_방전온도_상관.png` | (Phase 6) 각 OCV × 방전온도 트레이 내 상관 |
+| `21_구배탄생시점.png` | (Phase 6) 구배가 어느 구간에서 생기나 |
+| `22_완화모델_Vinf_k.png` | (Phase 6) 4점 완화모델 → V∞(참OCV)·k(자가방전) 분포 |
+| `셀별_완화모델.csv` | (Phase 6) 셀별 **V∞·k** (완화 제거된 선별 인자) |
+| `패턴분석_요약.xlsx` | 위 표들 + 트레이별 구배계수·강한패턴·정렬도·상관 |
 
 ## 패턴 정의 (히트맵 표시 기준)
 - **선형 기울기 8방향**: 오른쪽 / 왼쪽 / 위쪽 / 아래쪽 + **대각선** 오른쪽위 / 왼쪽위 / 오른쪽아래 / 왼쪽아래

@@ -77,6 +77,12 @@ COL = {
     "st1":     "Start Time_PRIVT OCV #01",
     "st2":     "Start Time_PRIVT OCV #02",
     "st3":     "Start Time_PRIVT OCV #03",
+    # 전공정(방전7) + 방전 직후 OCV7 (선택 컬럼: 있으면 열이력/완화 분석 활성화)
+    "dis_tmin": "DisCharge #07 최저 온도",
+    "dis_tavg": "DisCharge #07 평균온도",
+    "dis_tmax": "DisCharge #07 최고 온도",
+    "ocv7":     "OCV #07 OCV",
+    "st7":      "OCV #07 시작시간",
 }
 
 GRID = 12                 # 12 x 12
@@ -102,7 +108,8 @@ def load_data(path):
     df = pd.read_excel(path, engine="openpyxl")
     df.columns = [str(c).strip() for c in df.columns]
 
-    optional = {"st1", "st2", "st3", "cellpos", "label"}  # 없어도 분석 가능
+    optional = {"st1", "st2", "st3", "cellpos", "label",
+                "dis_tmin", "dis_tavg", "dis_tmax", "ocv7", "st7"}  # 없어도 분석 가능
     req_missing = [COL[k] for k in COL if k not in optional and COL[k] not in df.columns]
     opt_missing = [COL[k] for k in optional if COL[k] not in df.columns]
     if req_missing:
@@ -708,9 +715,9 @@ def plot_tray_evolution(df, keys, pat3, outpath, n_examples=3):
 # ══════════════════════════════════════════════════════════════════════
 #  ΔOCV 패턴 vs 온도 패턴 : 트렌드가 일치하나?
 # ══════════════════════════════════════════════════════════════════════
-def plot_ocv_temp_alignment(pat_ocv, series, outpath):
-    """ΔOCV 구배 방향과 각 온도 시리즈 구배 방향의 정렬도(코사인).
-    series: [(라벨, pat_df), ...] (온도1/2/3, 냉각량ΔT 등). 강한 ΔOCV 트레이만.
+def plot_ocv_temp_alignment(pat_ocv, series, outpath, title=None):
+    """ΔOCV 구배 방향과 각 시리즈 구배 방향의 정렬도(코사인).
+    series: [(라벨, pat_df), ...]. 강한 ΔOCV 트레이만.
     +1=같은방향, 0=무관, -1=반대."""
     strong = pat_ocv[(pat_ocv["패턴"] != "데이터 부족") &
                      (pat_ocv["설명력R2"] >= PATTERN_R2_STRONG)]
@@ -737,8 +744,8 @@ def plot_ocv_temp_alignment(pat_ocv, series, outpath):
     ax.axhline(0, color="k", lw=0.8)
     ax.set_ylim(-1, 1)
     ax.set_ylabel("구배 방향 정렬도 (코사인)")
-    ax.set_title("⑭ ΔOCV 구배와 온도/냉각량 구배가 같은 방향인가?\n"
-                 "+1=같은방향 · 0=무관 · -1=반대  |  0 근처면 온도가 ΔOCV패턴을 설명 못함",
+    ax.set_title(title or ("⑭ ΔOCV 구배와 온도/냉각량 구배가 같은 방향인가?\n"
+                 "+1=같은방향 · 0=무관 · -1=반대  |  0 근처면 온도가 ΔOCV패턴을 설명 못함"),
                  fontsize=11)
     fig.tight_layout()
     fig.savefig(outpath, dpi=130)
@@ -788,33 +795,30 @@ def plot_ocv_vs_temp_cards(df, keys, pat_ocv, outpath, max_rows=8):
     plt.close(fig)
 
 
-def ocv_temp_correlation(df, keys, outpath):
-    """각 OCV(OCV1/2/3/ΔOCV) × 각 온도(T1/T2/T3/ΔT) 상관.
-    ★트레이 평균을 뺀 '트레이 내 상관' — 트레이 간 offset(변동의 81%) 오염 제거."""
+def within_tray_corr(df, keys, ocv_specs, temp_specs, title, outpath):
+    """행(OCV류) × 열(온도류) 트레이 내 상관 히트맵 (트레이 평균 제거).
+    ocv_specs/temp_specs: [(표시이름, 컬럼명), ...]. 트레이 offset 오염 제거용."""
     df = df.copy()
     df["_tray"] = keys.values
-    df["_cool"] = df["t1"] - df["t3"]
-    ocv = [("OCV1", "ocv1"), ("OCV2", "ocv2"), ("OCV3", "ocv3"), ("ΔOCV", "docv")]
-    tmp = [("온도T1", "t1"), ("온도T2", "t2"), ("온도T3", "t3"), ("냉각량ΔT", "_cool")]
-
-    # 트레이 평균 제거(within-tray)
-    for _, c in ocv + tmp:
+    cols = list({c for _, c in ocv_specs} | {c for _, c in temp_specs})
+    for c in cols:
         df[c + "_w"] = df[c] - df.groupby("_tray")[c].transform("mean")
 
-    onames = [n for n, _ in ocv]
-    tnames = [n for n, _ in tmp]
-    mat = np.full((len(ocv), len(tmp)), np.nan)
-    for i, (_, oc) in enumerate(ocv):
-        for j, (_, tc) in enumerate(tmp):
+    onames = [n for n, _ in ocv_specs]
+    tnames = [n for n, _ in temp_specs]
+    mat = np.full((len(ocv_specs), len(temp_specs)), np.nan)
+    for i, (_, oc) in enumerate(ocv_specs):
+        for j, (_, tc) in enumerate(temp_specs):
             x = df[oc + "_w"].values
             y = df[tc + "_w"].values
             m = ~(np.isnan(x) | np.isnan(y))
             if m.sum() > 10 and np.std(x[m]) > 0 and np.std(y[m]) > 0:
                 mat[i, j] = np.corrcoef(x[m], y[m])[0, 1]
 
-    fig, ax = plt.subplots(figsize=(8, 6.5))
+    fig, ax = plt.subplots(figsize=(1.6 * len(tnames) + 3, 1.1 * len(onames) + 3))
     im = ax.imshow(mat, cmap="RdBu_r", vmin=-1, vmax=1)
-    ax.set_xticks(range(len(tnames))); ax.set_xticklabels(tnames, fontsize=10)
+    ax.set_xticks(range(len(tnames))); ax.set_xticklabels(tnames, fontsize=10,
+                                                          rotation=20, ha="right")
     ax.set_yticks(range(len(onames))); ax.set_yticklabels(onames, fontsize=10)
     for i in range(len(onames)):
         for j in range(len(tnames)):
@@ -822,14 +826,23 @@ def ocv_temp_correlation(df, keys, outpath):
                 ax.text(j, i, "%.2f" % mat[i, j], ha="center", va="center",
                         fontsize=11,
                         color="white" if abs(mat[i, j]) > 0.5 else "black")
-    ax.set_title("[16] 각 OCV × 각 온도 상관 (트레이 내, 평균제거)\n"
-                 "0 근처면 그 셀 온도가 OCV를 거의 안 흔든다는 뜻", fontsize=12)
+    ax.set_title(title, fontsize=12)
     fig.colorbar(im, ax=ax, shrink=0.8, label="상관계수")
     fig.tight_layout()
     fig.savefig(outpath, dpi=130)
     plt.close(fig)
     return pd.DataFrame(mat, index=onames, columns=tnames)
-    plt.close(fig)
+
+
+def ocv_temp_correlation(df, keys, outpath):
+    """[16] 각 OCV(1/2/3/ΔOCV) × 각 온도(T1/2/3/ΔT) 트레이 내 상관."""
+    df = df.copy()
+    df["_cool"] = df["t1"] - df["t3"]
+    ocv = [("OCV1", "ocv1"), ("OCV2", "ocv2"), ("OCV3", "ocv3"), ("ΔOCV", "docv")]
+    tmp = [("온도T1", "t1"), ("온도T2", "t2"), ("온도T3", "t3"), ("냉각량ΔT", "_cool")]
+    return within_tray_corr(df, keys, ocv, tmp,
+                            "[16] 각 OCV × 각 온도 상관 (트레이 내, 평균제거)\n"
+                            "0 근처면 그 셀 온도가 OCV를 거의 안 흔든다는 뜻", outpath)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -933,6 +946,117 @@ def detrend_docv(df, keys, outdir):
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  전공정(방전7) + OCV7 : 열이력 / 완화 분석
+# ══════════════════════════════════════════════════════════════════════
+DISCHARGE_KEYS = ["dis_tmin", "dis_tavg", "dis_tmax", "ocv7"]
+
+
+def has_discharge(df):
+    return all(COL[k] in df.columns for k in DISCHARGE_KEYS)
+
+
+def build_discharge_features(df):
+    """방전7 온도(min/avg/max)·스윙, OCV7, OCV7 시각 파생."""
+    for k in ["dis_tmin", "dis_tavg", "dis_tmax", "ocv7"]:
+        if COL[k] in df.columns:
+            df[k] = pd.to_numeric(df[COL[k]], errors="coerce")
+    if "dis_tmax" in df and "dis_tmin" in df:
+        df["dis_swing"] = df["dis_tmax"] - df["dis_tmin"]
+    df["st7_dt"] = (pd.to_datetime(df[COL["st7"]], errors="coerce")
+                    if COL["st7"] in df.columns else pd.NaT)
+    return df
+
+
+def check_percell_independence(df, keys, colmap):
+    """방전 온도가 셀별 독립 측정인지: 트레이 내 고유값 개수로 판별."""
+    d = df.copy()
+    d["_tray"] = keys.values
+    for label, col in colmap:
+        if col not in d:
+            continue
+        nun = d.groupby("_tray")[col].nunique()
+        med = float(nun.median()) if len(nun) else 0
+        flag = "OK(셀별 독립)" if med > 10 else "⚠ 공용센서 의심(트레이 내 값 거의 동일→공간분석 무의미)"
+        print("   %-10s 트레이 내 고유값(중앙값) %.0f → %s" % (label, med, flag))
+
+
+def plot_gradient_birth(pat_map, outpath):
+    """구배 '탄생 시점' 추적: 구간별 구배 세기(중앙값) 막대.
+    pat_map: [(라벨, pat_df), ...] 순서(OCV7 → 구간증분 → ΔOCV)."""
+    labels, meds = [], []
+    for label, p in pat_map:
+        a = p[p["패턴"] != "데이터 부족"]["구배크기"].dropna()
+        labels.append(label)
+        meds.append(float(a.median()) if len(a) else np.nan)
+    fig, ax = plt.subplots(figsize=(10, 5.5))
+    ax.bar(labels, meds, color="#4c72b0")
+    for i, mv in enumerate(meds):
+        if not np.isnan(mv):
+            ax.text(i, mv, "%.3f" % mv, ha="center", va="bottom", fontsize=10)
+    ax.set_ylabel("트레이 구배 세기 중앙값 (전압 단위)")
+    ax.set_title("[21] 구배는 언제 생기나 (구간별 공간구배 세기)\n"
+                 "OCV7에서 이미 크면=충방전공정, 특정 에이징 구간에서 커지면=완화",
+                 fontsize=11)
+    ax.tick_params(axis="x", rotation=15)
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=130)
+    plt.close(fig)
+
+
+def relaxation_fit(df, keys, outdir):
+    """4점(OCV7,1,2,3) 완화모델: V(t)=V∞ + A·exp(-t/τ) + k·t.
+    τ는 전역 그리드서치로 고정 → 셀별 (V∞, A, k) 선형 최소제곱.
+    V∞=참 OCV, k=순수 자가방전 기울기. 셀별 CSV + [22] 분포 그림."""
+    times = np.array([0.0, 1.0, 3.0, 4.0])   # OCV7=0, OCV1=1일, OCV2=3일, OCV3=4일
+    V = df[["ocv7", "ocv1", "ocv2", "ocv3"]].values.astype(float)
+    ok = ~np.isnan(V).any(axis=1)
+    if ok.sum() < 50:
+        print("[완화모델] 4점 유효셀 부족 → 생략")
+        return df, None
+
+    best = None
+    for tau in [0.3, 0.5, 0.7, 1.0, 1.5, 2.0, 3.0]:
+        basis = np.column_stack([np.ones(4), np.exp(-times / tau), times])
+        coef, _, _, _ = np.linalg.lstsq(basis, V[ok].T, rcond=None)
+        sse = np.nansum((V[ok].T - basis.dot(coef)) ** 2)
+        if best is None or sse < best[0]:
+            best = (sse, tau, basis, coef)
+    _, tau, basis, coef = best
+
+    Vinf = np.full(len(df), np.nan)
+    k = np.full(len(df), np.nan)
+    Vinf[ok] = coef[0]
+    k[ok] = coef[2]
+    df["OCV_Vinf"] = Vinf
+    df["자가방전_k"] = k
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    kk = k[ok]
+    axes[0].hist(kk, bins=60, color="#c44e52")
+    axes[0].set_xlabel("자가방전 기울기 k (전압/일)")
+    axes[0].set_ylabel("셀 수")
+    axes[0].set_title("k 분포 (완화 제거된 순수 자가방전)\n오른쪽/왼쪽 꼬리 = 불량 후보")
+    axes[1].scatter(Vinf[ok], kk, s=3, alpha=0.3)
+    axes[1].set_xlabel("V∞ (참 OCV)")
+    axes[1].set_ylabel("자가방전 기울기 k")
+    axes[1].set_title("V∞ vs k")
+    fig.suptitle("[22] 완화모델 분리 (τ=%.1f일 고정): V∞·k" % tau, fontsize=13)
+    fig.tight_layout(rect=[0, 0, 1, 0.93])
+    fig.savefig(os.path.join(outdir, "22_완화모델_Vinf_k.png"), dpi=130)
+    plt.close(fig)
+
+    out = df.copy()
+    out["_tray"] = keys.values
+    cols = ["_tray", COL["cellno"], "ocv7", "ocv1", "ocv2", "ocv3",
+            "OCV_Vinf", "자가방전_k"]
+    csv = os.path.join(outdir, "셀별_완화모델.csv")
+    out[cols].rename(columns={"_tray": "랏-트레이"}).to_csv(
+        csv, index=False, encoding="utf-8-sig")
+    print("[완화모델] τ=%.1f일, k중앙값=%.4f, 셀별: %s" % (tau, np.nanmedian(kk), csv))
+    return df, tau
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  메인
 # ══════════════════════════════════════════════════════════════════════
 def main():
@@ -959,6 +1083,7 @@ def main():
     plot_exclusion(report, os.path.join(args.outdir, "01_제외리포트.png"))
 
     df = build_time_features(df)
+    df = build_discharge_features(df)
     verify_docv(df)
     time_order_diagnostic(df, keys)
 
@@ -1057,6 +1182,67 @@ def main():
     print("\n[Phase 5] 구배 제거(detrend)")
     detrend_docv(df, keys, args.outdir)
 
+    # Phase 6 : 전공정(방전7)+OCV7 열이력/완화 (선택 컬럼 있을 때만) ----
+    corr_dis = None
+    if has_discharge(df):
+        print("\n[Phase 6] 전공정(방전7)+OCV7 열이력/완화 분석")
+        # 사전체크: 방전온도가 셀별 독립인가
+        check_percell_independence(df, keys,
+            [("방전Tmin", "dis_tmin"), ("방전Tavg", "dis_tavg"),
+             ("방전Tmax", "dis_tmax")])
+
+        # 파생: 완화 구간 증분
+        df["_inc01"] = df["ocv1"] - df["ocv7"]   # 방전직후→1일 (최대완화)
+        df["_inc12"] = df["ocv2"] - df["ocv1"]
+        df["_inc23"] = df["ocv3"] - df["ocv2"]
+
+        # [18] 방전온도 패턴 (Tmax 대표) + 강한패턴 요약
+        pat_dtmax = per_tray_patterns(df, "dis_tmax", keys)
+        pat_dtavg = per_tray_patterns(df, "dis_tavg", keys)
+        pat_dswing = per_tray_patterns(df, "dis_swing", keys)
+        for lb, pp in [("방전Tmax", pat_dtmax), ("방전Tavg", pat_dtavg),
+                       ("방전스윙", pat_dswing)]:
+            ss, tt = strong_summary(pp)
+            print("   %s 강한패턴(R²≥%.2f): %d/%d" % (lb, PATTERN_R2_STRONG, ss, tt))
+        plot_pattern_menu(pattern_counts(pat_dtmax), "[18] 방전 Tmax 패턴별 트레이 개수",
+                          os.path.join(args.outdir, "18_방전Tmax패턴.png"))
+
+        # [19] 정렬도 확장: ΔOCV 구배 vs 방전온도/OCV7/완화 구배 방향
+        pat_ocv7 = per_tray_patterns(df, "ocv7", keys)
+        pat_inc01 = per_tray_patterns(df, "_inc01", keys)
+        align_dis = plot_ocv_temp_alignment(pat_ocv,
+            [("방전Tmax", pat_dtmax), ("방전Tavg", pat_dtavg), ("방전스윙", pat_dswing),
+             ("OCV7", pat_ocv7), ("완화OCV1-7", pat_inc01)],
+            os.path.join(args.outdir, "19_방전_정렬도.png"),
+            title="[19] ΔOCV 구배가 무엇과 같은 방향인가 (방전온도·OCV7·완화)\n"
+                  "높으면=열이력/공정 원인 · 0이면 무관")
+        print("   [19] ΔOCV vs 방전요인 정렬도:",
+              {k: round(v[0], 2) for k, v in align_dis.items()})
+
+        # [20] 상관 확장: 각 OCV × 방전온도(트레이 내)
+        ocv_specs = [("OCV7", "ocv7"), ("OCV1", "ocv1"), ("ΔOCV", "docv"),
+                     ("완화OCV1-7", "_inc01")]
+        dis_specs = [("방전Tmin", "dis_tmin"), ("방전Tavg", "dis_tavg"),
+                     ("방전Tmax", "dis_tmax"), ("방전스윙", "dis_swing")]
+        corr_dis = within_tray_corr(df, keys, ocv_specs, dis_specs,
+            "[20] 각 OCV × 방전온도 상관 (트레이 내, 평균제거)",
+            os.path.join(args.outdir, "20_OCV_방전온도_상관.png"))
+        print("\n   [각 OCV × 방전온도 상관]\n" + corr_dis.round(2).to_string())
+
+        # [21] 구배 탄생 시점: 구간별 구배 세기
+        pat_inc12 = per_tray_patterns(df, "_inc12", keys)
+        pat_inc23 = per_tray_patterns(df, "_inc23", keys)
+        plot_gradient_birth(
+            [("OCV7(방전직후)", pat_ocv7), ("OCV1-OCV7(1일)", pat_inc01),
+             ("OCV2-OCV1", pat_inc12), ("OCV3-OCV2", pat_inc23),
+             ("ΔOCV(OCV1-3)", pat_ocv)],
+            os.path.join(args.outdir, "21_구배탄생시점.png"))
+
+        # [22] 4점 완화모델 → V∞, k 분리
+        df, _ = relaxation_fit(df, keys, args.outdir)
+    else:
+        print("\n[Phase 6] 방전7/OCV7 컬럼 없음 → 열이력/완화 분석 생략")
+
     # 냉각패턴 vs OCV패턴 겹침 (냉각이 큰 곳에서 OCV도 튀나) -----------
     merged = pd.merge(
         pat_cool[["랏-트레이", "패턴"]].rename(columns={"패턴": "냉각패턴"}),
@@ -1086,10 +1272,12 @@ def main():
         pd.DataFrame({k: [v[0], v[1]] for k, v in align.items()},
                      index=["정렬도(코사인)", "트레이수"]).T.to_excel(xw, "OCV온도_정렬도")
         corr_ot.to_excel(xw, "OCV온도_상관")
+        if corr_dis is not None:
+            corr_dis.to_excel(xw, "OCV방전온도_상관")
 
     print("\n" + "=" * 60)
     print(" 완료. 결과 폴더:", os.path.abspath(args.outdir))
-    print("   - PNG 17장 + 요약 Excel + 셀별_ΔOCV_보정.csv")
+    print("   - PNG + 요약 Excel + 셀별 CSV(ΔOCV보정 / 완화모델)")
     print("=" * 60)
 
 
