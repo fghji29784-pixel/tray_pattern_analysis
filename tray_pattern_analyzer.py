@@ -1056,6 +1056,128 @@ def relaxation_fit(df, keys, outdir):
     return df, tau
 
 
+def pick_rep_trays(pat_ocv, n=4):
+    """ΔOCV 패턴이 가장 뚜렷한(R² 최고) 대표 트레이 n개."""
+    sub = pat_ocv[pat_ocv["패턴"] != "데이터 부족"].sort_values(
+        "설명력R2", ascending=False)
+    return [(r["랏-트레이"], "ΔOCV R²=%.2f" % r["설명력R2"])
+            for _, r in sub.head(n).iterrows()]
+
+
+def plot_field_evolution(df, keys, reps, fields, suptitle, outpath):
+    """대표 트레이들의 여러 필드(OCV7→1→2→3 또는 온도)를 나란히 히트맵.
+    reps: [(랏-트레이, 주석)], fields: [(표시이름, 컬럼)]."""
+    if not reps:
+        return
+    df = df.copy()
+    df["_tray"] = keys.values
+    fig, axes = plt.subplots(len(reps), len(fields),
+                             figsize=(3.6 * len(fields), 3.4 * len(reps)),
+                             squeeze=False)
+    for ri, (tray, ann) in enumerate(reps):
+        g = df[df["_tray"] == tray]
+        for ci, (cname, col) in enumerate(fields):
+            ax = axes[ri][ci]
+            grid = tray_grid(g, col, mask_outliers=True)
+            vmin, vmax = robust_clim(grid)
+            im = ax.imshow(grid, cmap="coolwarm", origin="upper",
+                           vmin=vmin, vmax=vmax)
+            if ri == 0:
+                ax.set_title(cname, fontsize=10)
+            if ci == 0:
+                ax.set_ylabel("%s\n%s" % (str(tray)[:16], ann), fontsize=8)
+            ax.set_xticks([]); ax.set_yticks([])
+            fig.colorbar(im, ax=ax, shrink=0.7)
+    fig.suptitle(suptitle, fontsize=13)
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    fig.savefig(outpath, dpi=130)
+    plt.close(fig)
+
+
+def detect_shared_fingerprint(df, keys, value_col, title, outpath):
+    """[27] 공유 지문 탐지: 트레이별 공간필드의 '공통 평균필드'와의 상관 분포.
+    1 근처 몰림 = 공유(설비/계통) 지문, 넓게 퍼짐 = 트레이 고유(물리)."""
+    df = df.copy()
+    df["_tray"] = keys.values
+    vecs = []
+    for _, g in df.groupby("_tray"):
+        grid = tray_grid(g, value_col, mask_outliers=True)
+        vec = grid.flatten()
+        if np.sum(~np.isnan(vec)) < MIN_VALID_CELLS:
+            continue
+        vecs.append(vec - np.nanmedian(vec))
+    if len(vecs) < 5:
+        print("[지문] 트레이 부족 → 생략")
+        return None
+    M = np.array(vecs)
+    meanfield = np.nanmean(M, axis=0)
+    cors = []
+    for row in M:
+        m = ~(np.isnan(row) | np.isnan(meanfield))
+        if m.sum() > 50 and np.nanstd(row[m]) > 0 and np.nanstd(meanfield[m]) > 0:
+            cors.append(np.corrcoef(row[m], meanfield[m])[0, 1])
+    cors = np.array(cors)
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5.2))
+    im = axes[0].imshow(meanfield.reshape(GRID, GRID), cmap="coolwarm",
+                        origin="upper")
+    axes[0].set_title("공통 평균 필드 (모든 트레이 겹친 지문)")
+    axes[0].set_xticks([0, 11]); axes[0].set_xticklabels(["왼쪽", "오른쪽"], fontsize=8)
+    axes[0].set_yticks([0, 11]); axes[0].set_yticklabels(["위", "아래"], fontsize=8)
+    fig.colorbar(im, ax=axes[0], shrink=0.7)
+    axes[1].hist(cors, bins=40, color="#4c72b0")
+    axes[1].axvline(np.median(cors), color="k", ls="--",
+                    label="중앙값 %.2f" % np.median(cors))
+    axes[1].set_xlabel("각 트레이 ↔ 공통필드 상관")
+    axes[1].set_ylabel("트레이 수")
+    axes[1].legend()
+    axes[1].set_title("1 근처 몰림=공유 지문(설비/계통 의심)\n넓게 퍼짐=트레이 고유(물리)")
+    fig.suptitle(title, fontsize=13)
+    fig.tight_layout(rect=[0, 0, 1, 0.93])
+    fig.savefig(outpath, dpi=130)
+    plt.close(fig)
+    print("[지문] %s 공통필드 상관 중앙값=%.2f" % (value_col, np.median(cors)))
+    return float(np.median(cors))
+
+
+def rest_time_diagnostic(df, keys, outpath):
+    """[28] 실제 휴지시간(OCV7→OCV1) 분포 + 위치 구조 + ΔOCV 트레이내 상관."""
+    if not (df["st7_dt"].notna().any() and df["st1_dt"].notna().any()):
+        print("[휴지시간] OCV7/OCV1 시각 없음 → 생략")
+        return
+    d = df.copy()
+    d["_tray"] = keys.values
+    d["_rest"] = (d["st1_dt"] - d["st7_dt"]).dt.total_seconds() / 3600.0
+    for c in ["_rest", "docv"]:
+        d[c + "_w"] = d[c] - d.groupby("_tray")[c].transform("mean")
+    x = d["_rest_w"].values; y = d["docv_w"].values
+    m = ~(np.isnan(x) | np.isnan(y))
+    corr = (np.corrcoef(x[m], y[m])[0, 1]
+            if m.sum() > 10 and np.std(x[m]) > 0 else np.nan)
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    axes[0].hist(d["_rest"].dropna(), bins=60, color="#55a868")
+    axes[0].set_xlabel("실제 휴지시간 OCV7→OCV1 (시간)")
+    axes[0].set_ylabel("셀 수")
+    axes[0].set_title("휴지시간 분포 (중앙값 %.1fh)" % np.nanmedian(d["_rest"]))
+    dd = d.dropna(subset=["_rest", "row", "col"])
+    grid = np.full((GRID, GRID), np.nan)
+    for (r, c), gg in dd.groupby(["row", "col"]):
+        grid[int(r), int(c)] = gg["_rest"].mean()
+    im = axes[1].imshow(grid, cmap="viridis", origin="upper")
+    axes[1].set_title("위치별 평균 휴지시간\n(위치 구조 있으면 측정순서 교란)")
+    axes[1].set_xticks([0, 11]); axes[1].set_xticklabels(["왼쪽", "오른쪽"], fontsize=8)
+    axes[1].set_yticks([0, 11]); axes[1].set_yticklabels(["위", "아래"], fontsize=8)
+    fig.colorbar(im, ax=axes[1], shrink=0.7)
+    fig.suptitle("[28] 실제 휴지시간 & ΔOCV 교란 (트레이내 상관 r=%.2f)" % corr,
+                 fontsize=13)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    fig.savefig(outpath, dpi=130)
+    plt.close(fig)
+    print("[휴지시간] 중앙값=%.1fh, ΔOCV와 트레이내 상관=%.2f"
+          % (np.nanmedian(d["_rest"]), corr))
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  메인
 # ══════════════════════════════════════════════════════════════════════
@@ -1240,6 +1362,34 @@ def main():
 
         # [22] 4점 완화모델 → V∞, k 분리
         df, _ = relaxation_fit(df, keys, args.outdir)
+
+        # OCV7 / 방전Tmax 대표트레이 카드 (다른 OCV처럼 패턴 히트맵)
+        plot_pattern_cards(df, "ocv7", pat_ocv7, keys,
+                           os.path.join(args.outdir, "23_OCV7_대표트레이.png"),
+                           "OCV7(방전직후) 패턴별 대표 트레이 (12x12, 튀는 셀 제거)")
+        plot_pattern_cards(df, "dis_tmax", pat_dtmax, keys,
+                           os.path.join(args.outdir, "24_방전Tmax_대표트레이.png"),
+                           "방전 Tmax 패턴별 대표 트레이 (12x12, 튀는 셀 제거)")
+
+        # 대표트레이 궤적: OCV7→1→2→3, 온도(방전Tmax→OCV1/2/3)
+        reps = pick_rep_trays(pat_ocv, 4)
+        plot_field_evolution(df, keys, reps,
+            [("OCV7", "ocv7"), ("OCV1", "ocv1"), ("OCV2", "ocv2"), ("OCV3", "ocv3")],
+            "[25] 대표트레이 OCV 궤적 (OCV7→OCV1→OCV2→OCV3, 구배가 어디서 생기나)",
+            os.path.join(args.outdir, "25_대표트레이_OCV궤적.png"))
+        plot_field_evolution(df, keys, reps,
+            [("방전Tmax", "dis_tmax"), ("OCV1온도", "t1"),
+             ("OCV2온도", "t2"), ("OCV3온도", "t3")],
+            "[26] 대표트레이 온도 궤적 (방전Tmax→OCV1/2/3 온도)",
+            os.path.join(args.outdir, "26_대표트레이_온도궤적.png"))
+
+        # [27] 공유 지문 탐지(설비/계통 vs 물리) — 설비ID 없이 1차 판정
+        detect_shared_fingerprint(df, keys, "docv",
+            "[27] ΔOCV 공유 지문 탐지 (설비/계통 vs 물리)",
+            os.path.join(args.outdir, "27_ΔOCV_공유지문.png"))
+        # [28] 실제 휴지시간(OCV7→OCV1) 정규화 진단
+        rest_time_diagnostic(df, keys,
+            os.path.join(args.outdir, "28_휴지시간.png"))
     else:
         print("\n[Phase 6] 방전7/OCV7 컬럼 없음 → 열이력/완화 분석 생략")
 
