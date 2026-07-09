@@ -1095,13 +1095,15 @@ def plot_field_evolution(df, keys, reps, fields, suptitle, outpath):
 
 
 def detect_shared_fingerprint(df, keys, value_col, title, outpath):
-    """[27] 공유 지문 탐지: 트레이별 공간필드의 '공통 평균필드'와의 상관 분포.
-    1 근처 몰림 = 공유(설비/계통) 지문, 넓게 퍼짐 = 트레이 고유(물리)."""
+    """[27] 공유 지문 탐지: 트레이 공간필드의 '공통 필드'와의 상관 분포.
+    공통필드 = 트레이 간 중앙값(가끔 튀는 셀에 강건).
+    ★이상치 마스킹 OFF(계통 오프셋을 스스로 지우지 않도록),
+      위치별 유효 표본 수를 함께 보여 코너/특정칸이 표본부족 아티팩트인지 판별."""
     df = df.copy()
     df["_tray"] = keys.values
     vecs = []
     for _, g in df.groupby("_tray"):
-        grid = tray_grid(g, value_col, mask_outliers=True)
+        grid = tray_grid(g, value_col, mask_outliers=False)  # 계통 오프셋 보존
         vec = grid.flatten()
         if np.sum(~np.isnan(vec)) < MIN_VALID_CELLS:
             continue
@@ -1110,37 +1112,48 @@ def detect_shared_fingerprint(df, keys, value_col, title, outpath):
         print("[지문] 트레이 부족 → 생략")
         return None
     M = np.array(vecs)
-    meanfield = np.nanmean(M, axis=0)
+    count = np.sum(~np.isnan(M), axis=0)          # 위치별 유효 트레이 수
+    min_count = max(5, int(0.2 * len(vecs)))       # 20% 미만인 칸은 못 믿음
+    commonfield = np.nanmedian(M, axis=0)          # 트레이 간 중앙값(강건)
+    commonfield[count < min_count] = np.nan        # 표본부족 칸 제외
+
     cors = []
     for row in M:
-        m = ~(np.isnan(row) | np.isnan(meanfield))
-        if m.sum() > 50 and np.nanstd(row[m]) > 0 and np.nanstd(meanfield[m]) > 0:
-            cors.append(np.corrcoef(row[m], meanfield[m])[0, 1])
+        m = ~(np.isnan(row) | np.isnan(commonfield))
+        if m.sum() > 50 and np.nanstd(row[m]) > 0 and np.nanstd(commonfield[m]) > 0:
+            cors.append(np.corrcoef(row[m], commonfield[m])[0, 1])
     cors = np.array(cors)
     if len(cors) < 5:   # 변동 없는 신호(예: 상수 온도) → 지문 정의 불가
         print("[지문] %s 유효 상관 부족 → 생략" % value_col)
         plt.close("all")
         return None
 
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5.2))
-    im = axes[0].imshow(meanfield.reshape(GRID, GRID), cmap="coolwarm",
-                        origin="upper")
-    axes[0].set_title("공통 평균 필드 (모든 트레이 겹친 지문)")
+    fig, axes = plt.subplots(1, 3, figsize=(17, 5.2))
+    cf = commonfield.reshape(GRID, GRID)
+    lo, hi = robust_clim(cf)
+    im0 = axes[0].imshow(cf, cmap="coolwarm", origin="upper", vmin=lo, vmax=hi)
+    axes[0].set_title("공통 필드 (트레이 간 중앙값 = 지문)")
     axes[0].set_xticks([0, 11]); axes[0].set_xticklabels(["왼쪽", "오른쪽"], fontsize=8)
     axes[0].set_yticks([0, 11]); axes[0].set_yticklabels(["위", "아래"], fontsize=8)
-    fig.colorbar(im, ax=axes[0], shrink=0.7)
-    axes[1].hist(cors, bins=40, color="#4c72b0")
-    axes[1].axvline(np.median(cors), color="k", ls="--",
+    fig.colorbar(im0, ax=axes[0], shrink=0.7)
+    im1 = axes[1].imshow(count.reshape(GRID, GRID), cmap="viridis", origin="upper")
+    axes[1].set_title("위치별 유효 트레이 수\n(코너/특정칸이 낮으면 그 칸 지문은 못 믿음)")
+    axes[1].set_xticks([0, 11]); axes[1].set_xticklabels(["왼쪽", "오른쪽"], fontsize=8)
+    axes[1].set_yticks([0, 11]); axes[1].set_yticklabels(["위", "아래"], fontsize=8)
+    fig.colorbar(im1, ax=axes[1], shrink=0.7)
+    axes[2].hist(cors, bins=40, color="#4c72b0")
+    axes[2].axvline(np.median(cors), color="k", ls="--",
                     label="중앙값 %.2f" % np.median(cors))
-    axes[1].set_xlabel("각 트레이 ↔ 공통필드 상관")
-    axes[1].set_ylabel("트레이 수")
-    axes[1].legend()
-    axes[1].set_title("1 근처 몰림=공유 지문(설비/계통 의심)\n넓게 퍼짐=트레이 고유(물리)")
+    axes[2].set_xlabel("각 트레이 ↔ 공통필드 상관")
+    axes[2].set_ylabel("트레이 수")
+    axes[2].legend()
+    axes[2].set_title("1 근처 몰림=공유 지문(설비/계통 의심)\n넓게 퍼짐=트레이 고유(물리)")
     fig.suptitle(title, fontsize=13)
     fig.tight_layout(rect=[0, 0, 1, 0.93])
     fig.savefig(outpath, dpi=130)
     plt.close(fig)
-    print("[지문] %s 공통필드 상관 중앙값=%.2f" % (value_col, np.median(cors)))
+    print("[지문] %s 공통필드 상관 중앙값=%.2f (유효표본 최소 %d)"
+          % (value_col, np.median(cors), int(count.min())))
     return float(np.median(cors))
 
 
