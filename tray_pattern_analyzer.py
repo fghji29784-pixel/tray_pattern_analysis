@@ -1117,6 +1117,10 @@ def detect_shared_fingerprint(df, keys, value_col, title, outpath):
         if m.sum() > 50 and np.nanstd(row[m]) > 0 and np.nanstd(meanfield[m]) > 0:
             cors.append(np.corrcoef(row[m], meanfield[m])[0, 1])
     cors = np.array(cors)
+    if len(cors) < 5:   # 변동 없는 신호(예: 상수 온도) → 지문 정의 불가
+        print("[지문] %s 유효 상관 부족 → 생략" % value_col)
+        plt.close("all")
+        return None
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 5.2))
     im = axes[0].imshow(meanfield.reshape(GRID, GRID), cmap="coolwarm",
@@ -1138,6 +1142,47 @@ def detect_shared_fingerprint(df, keys, value_col, title, outpath):
     plt.close(fig)
     print("[지문] %s 공통필드 상관 중앙값=%.2f" % (value_col, np.median(cors)))
     return float(np.median(cors))
+
+
+def fingerprint_all(df, keys, specs, outdir):
+    """[27] 여러 신호(OCV7/1/2/3/ΔOCV/온도 등) 각각에 공유지문 탐지 + 요약 비교.
+    개별 그림은 results/지문/ 에, 요약 막대는 메인에 저장."""
+    sub = os.path.join(outdir, "지문")
+    os.makedirs(sub, exist_ok=True)
+    results = {}
+    for label, col in specs:
+        if col not in df.columns:
+            continue
+        med = detect_shared_fingerprint(df, keys, col,
+            "[27] %s 공유 지문 (설비/계통 vs 물리)" % label,
+            os.path.join(sub, "지문_%s.png" % label))
+        if med is not None and not np.isnan(med):
+            results[label] = med
+    if not results:
+        return results
+
+    labels = list(results.keys())
+    vals = [results[k] for k in labels]
+    fig, ax = plt.subplots(figsize=(max(8, 0.85 * len(labels) + 2), 5.5))
+    ax.bar(labels, vals,
+           color=["#c44e52" if v >= 0.5 else "#4c72b0" for v in vals])
+    for i, v in enumerate(vals):
+        ax.text(i, v, "%.2f" % v, ha="center",
+                va="bottom" if v >= 0 else "top", fontsize=10)
+    ax.axhline(0.5, color="k", ls="--", lw=0.8, label="0.5 (공유지문 기준선)")
+    ax.axhline(0, color="k", lw=0.6)
+    ax.set_ylim(min(-0.2, min(vals) - 0.1), 1)
+    ax.set_ylabel("공통필드 상관 중앙값 (높을수록 공유 지문 강함)")
+    ax.set_title("[27] 신호별 공유 지문 강도 비교\n"
+                 "OCV1/2/3만 높고 OCV7 낮으면=OCV측정기 핀맵 · 온도가 높으면=열/위치",
+                 fontsize=11)
+    ax.tick_params(axis="x", rotation=30)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(os.path.join(outdir, "27_지문_요약.png"), dpi=130)
+    plt.close(fig)
+    print("[지문요약]", {k: round(v, 2) for k, v in results.items()})
+    return results
 
 
 def rest_time_diagnostic(df, keys, outpath):
@@ -1383,15 +1428,23 @@ def main():
             "[26] 대표트레이 온도 궤적 (방전Tmax→OCV1/2/3 온도)",
             os.path.join(args.outdir, "26_대표트레이_온도궤적.png"))
 
-        # [27] 공유 지문 탐지(설비/계통 vs 물리) — 설비ID 없이 1차 판정
-        detect_shared_fingerprint(df, keys, "docv",
-            "[27] ΔOCV 공유 지문 탐지 (설비/계통 vs 물리)",
-            os.path.join(args.outdir, "27_ΔOCV_공유지문.png"))
+        # [27] 공유 지문: 모든 OCV·온도 각각 실행 + 요약 비교
+        fingerprint_all(df, keys,
+            [("OCV7", "ocv7"), ("OCV1", "ocv1"), ("OCV2", "ocv2"), ("OCV3", "ocv3"),
+             ("ΔOCV", "docv"), ("완화OCV1-7", "_inc01"),
+             ("온도T1", "t1"), ("온도T2", "t2"), ("온도T3", "t3"), ("냉각량", "_cool"),
+             ("방전Tmax", "dis_tmax"), ("방전Tavg", "dis_tavg"), ("방전스윙", "dis_swing")],
+            args.outdir)
         # [28] 실제 휴지시간(OCV7→OCV1) 정규화 진단
         rest_time_diagnostic(df, keys,
             os.path.join(args.outdir, "28_휴지시간.png"))
     else:
         print("\n[Phase 6] 방전7/OCV7 컬럼 없음 → 열이력/완화 분석 생략")
+        df["_cool"] = df["t1"] - df["t3"]
+        fingerprint_all(df, keys,
+            [("OCV1", "ocv1"), ("OCV2", "ocv2"), ("OCV3", "ocv3"), ("ΔOCV", "docv"),
+             ("온도T1", "t1"), ("온도T2", "t2"), ("온도T3", "t3"), ("냉각량", "_cool")],
+            args.outdir)
 
     # 냉각패턴 vs OCV패턴 겹침 (냉각이 큰 곳에서 OCV도 튀나) -----------
     merged = pd.merge(
