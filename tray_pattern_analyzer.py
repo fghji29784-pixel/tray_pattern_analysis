@@ -1121,10 +1121,35 @@ def detect_shared_fingerprint(df, keys, value_col, title, outpath):
         print("[지문] 트레이 부족 → 생략")
         return None
     M = np.array(vecs)
+    n = len(M)
     count = np.sum(~np.isnan(M), axis=0)          # 위치별 유효 트레이 수
-    min_count = max(5, int(0.2 * len(vecs)))       # 20% 미만인 칸은 못 믿음
+    min_count = max(5, int(0.2 * n))               # 20% 미만인 칸은 못 믿음
     commonfield = np.nanmedian(M, axis=0)          # 트레이 간 중앙값(강건)
     commonfield[count < min_count] = np.nan        # 표본부족 칸 제외
+
+    # 신뢰도 z = 공통값 / 표준오차(로버스트). |z|>3 만 통계적으로 진짜
+    mad = np.nanmedian(np.abs(M - np.nanmedian(M, axis=0)), axis=0)
+    se = 1.4826 * mad / np.sqrt(np.maximum(count, 1))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        z = commonfield / se
+    z[(count < min_count) | ~np.isfinite(z)] = np.nan
+    n_sig = int(np.sum(np.abs(z) > 3))
+
+    # 반반 재현성: 트레이를 랜덤 둘로 쪼개 각각 공통필드 → 재현되면 진짜
+    rng = np.random.RandomState(0)
+    perm = rng.permutation(n)
+    h = n // 2
+    A = np.nanmedian(M[perm[:h]], axis=0)
+    B = np.nanmedian(M[perm[h:]], axis=0)
+    cA = np.sum(~np.isnan(M[perm[:h]]), axis=0)
+    cB = np.sum(~np.isnan(M[perm[h:]]), axis=0)
+    mc2 = max(3, min_count // 2)
+    A[cA < mc2] = np.nan
+    B[cB < mc2] = np.nan
+    mm = ~(np.isnan(A) | np.isnan(B))
+    split_corr = (np.corrcoef(A[mm], B[mm])[0, 1]
+                  if mm.sum() > 10 and np.std(A[mm]) > 0 and np.std(B[mm]) > 0
+                  else np.nan)
 
     cors = []
     for row in M:
@@ -1137,30 +1162,39 @@ def detect_shared_fingerprint(df, keys, value_col, title, outpath):
         plt.close("all")
         return None
 
-    fig, axes = plt.subplots(1, 3, figsize=(17, 5.2))
+    fig, ax = plt.subplots(2, 3, figsize=(17, 11))
     cf = commonfield.reshape(GRID, GRID)
     lo, hi = robust_clim(cf)
-    im0 = axes[0].imshow(cf, cmap="coolwarm", origin="upper", vmin=lo, vmax=hi)
-    axes[0].set_title("공통 필드 (트레이 간 중앙값 = 지문)")
-    set_ab_ticks(axes[0], fontsize=7)
-    fig.colorbar(im0, ax=axes[0], shrink=0.7)
-    im1 = axes[1].imshow(count.reshape(GRID, GRID), cmap="viridis", origin="upper")
-    axes[1].set_title("위치별 유효 트레이 수\n(코너/특정칸이 낮으면 그 칸 지문은 못 믿음)")
-    set_ab_ticks(axes[1], fontsize=7)
-    fig.colorbar(im1, ax=axes[1], shrink=0.7)
-    axes[2].hist(cors, bins=40, color="#4c72b0")
-    axes[2].axvline(np.median(cors), color="k", ls="--",
-                    label="중앙값 %.2f" % np.median(cors))
-    axes[2].set_xlabel("각 트레이 ↔ 공통필드 상관")
-    axes[2].set_ylabel("트레이 수")
-    axes[2].legend()
-    axes[2].set_title("1 근처 몰림=공유 지문(설비/계통 의심)\n넓게 퍼짐=트레이 고유(물리)")
-    fig.suptitle(title, fontsize=13)
-    fig.tight_layout(rect=[0, 0, 1, 0.93])
+    im = ax[0, 0].imshow(cf, cmap="coolwarm", origin="upper", vmin=lo, vmax=hi)
+    ax[0, 0].set_title("① 공통 필드 (트레이 간 중앙값 = 지문)")
+    set_ab_ticks(ax[0, 0], fontsize=6); fig.colorbar(im, ax=ax[0, 0], shrink=0.7)
+    im = ax[0, 1].imshow(count.reshape(GRID, GRID), cmap="viridis", origin="upper")
+    ax[0, 1].set_title("② 위치별 유효 트레이 수\n(낮은 칸은 못 믿음)")
+    set_ab_ticks(ax[0, 1], fontsize=6); fig.colorbar(im, ax=ax[0, 1], shrink=0.7)
+    im = ax[0, 2].imshow(z.reshape(GRID, GRID), cmap="RdBu_r", origin="upper",
+                         vmin=-6, vmax=6)
+    ax[0, 2].set_title("③ 신뢰도 z=값/표준오차\n|z|>3 만 진짜 (해당 칸 %d개)" % n_sig)
+    set_ab_ticks(ax[0, 2], fontsize=6); fig.colorbar(im, ax=ax[0, 2], shrink=0.7)
+    im = ax[1, 0].imshow(A.reshape(GRID, GRID), cmap="coolwarm", origin="upper",
+                         vmin=lo, vmax=hi)
+    ax[1, 0].set_title("④ 반반-A 공통필드")
+    set_ab_ticks(ax[1, 0], fontsize=6); fig.colorbar(im, ax=ax[1, 0], shrink=0.7)
+    im = ax[1, 1].imshow(B.reshape(GRID, GRID), cmap="coolwarm", origin="upper",
+                         vmin=lo, vmax=hi)
+    ax[1, 1].set_title("⑤ 반반-B 공통필드\nA와 상관=%.2f (높으면 재현=진짜)" % split_corr)
+    set_ab_ticks(ax[1, 1], fontsize=6); fig.colorbar(im, ax=ax[1, 1], shrink=0.7)
+    ax[1, 2].hist(cors, bins=40, color="#4c72b0")
+    ax[1, 2].axvline(np.median(cors), color="k", ls="--",
+                     label="중앙값 %.2f" % np.median(cors))
+    ax[1, 2].set_xlabel("각 트레이 ↔ 공통필드 상관")
+    ax[1, 2].set_ylabel("트레이 수"); ax[1, 2].legend()
+    ax[1, 2].set_title("⑥ 개별↔공통 상관\n몰림=공유지문 · 퍼짐=물리")
+    fig.suptitle(title, fontsize=14)
+    fig.tight_layout(rect=[0, 0, 1, 0.95], h_pad=3.5)
     fig.savefig(outpath, dpi=130)
     plt.close(fig)
-    print("[지문] %s 공통필드 상관 중앙값=%.2f (유효표본 최소 %d)"
-          % (value_col, np.median(cors), int(count.min())))
+    print("[지문] %s: 상관중앙=%.2f, 반반재현=%.2f, |z|>3칸=%d, 최소표본=%d"
+          % (value_col, np.median(cors), split_corr, n_sig, int(count.min())))
     return float(np.median(cors))
 
 
