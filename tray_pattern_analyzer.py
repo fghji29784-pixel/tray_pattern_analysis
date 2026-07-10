@@ -423,6 +423,16 @@ def tray_grid(g, value_col, mask_outliers=True):
     return grid
 
 
+def set_ab_ticks(ax, fontsize=7, every=1):
+    """히트맵 축을 열 A~L / 행 1~12 로 표시 (CELL NO 매핑 기준)."""
+    xs = list(range(0, GRID, every))
+    ys = list(range(0, GRID, every))
+    ax.set_xticks(xs)
+    ax.set_xticklabels([chr(ord("A") + i) for i in xs], fontsize=fontsize)
+    ax.set_yticks(ys)
+    ax.set_yticklabels([str(i + 1) for i in ys], fontsize=fontsize)
+
+
 def robust_clim(grid):
     """튀는 셀에 눈금이 먹히지 않도록 2~98 백분위로 색 범위 설정."""
     finite = grid[np.isfinite(grid)]
@@ -527,8 +537,7 @@ def plot_pattern_cards(df, value_col, pat_df, keys, outpath, title, unit=""):
         im = ax.imshow(grid, cmap="coolwarm", origin="upper", vmin=vmin, vmax=vmax)
         ax.set_title("%s\nR²=%.2f · 세기=%.2f\n(%s)" % (cat, r2, mag, str(rep)[:18]),
                      fontsize=8)
-        ax.set_xticks([0, 11]); ax.set_xticklabels(["왼쪽", "오른쪽"], fontsize=7)
-        ax.set_yticks([0, 11]); ax.set_yticklabels(["위", "아래"], fontsize=7)
+        set_ab_ticks(ax, fontsize=6)
         fig.colorbar(im, ax=ax, shrink=0.7)
     for k in range(len(cats), nrow * ncol):
         axes[k // ncol][k % ncol].axis("off")
@@ -703,7 +712,7 @@ def plot_tray_evolution(df, keys, pat3, outpath, n_examples=3):
                 ax.set_title(name, fontsize=10)
             if ci == 0:
                 ax.set_ylabel(str(tray)[:18], fontsize=8)
-            ax.set_xticks([]); ax.set_yticks([])
+            set_ab_ticks(ax, fontsize=5, every=3)
             fig.colorbar(im, ax=ax, shrink=0.7)
     fig.suptitle("⑨ 대표 트레이의 시간별 온도 변화 (왼→오: 시간경과, 맨오른쪽=냉각량)",
                  fontsize=13)
@@ -786,7 +795,7 @@ def plot_ocv_vs_temp_cards(df, keys, pat_ocv, outpath, max_rows=8):
                 ax.set_title(cname, fontsize=10)
             if ci == 0:
                 ax.set_ylabel("%s\nR²=%.2f" % (cat, r2), fontsize=8)
-            ax.set_xticks([]); ax.set_yticks([])
+            set_ab_ticks(ax, fontsize=5, every=3)
             fig.colorbar(im, ax=ax, shrink=0.7)
     fig.suptitle("⑮ ΔOCV 패턴별 대표트레이: ΔOCV vs 온도1/2/3 + 온도변화량 (왼쪽 ΔOCV와 오른쪽들이 닮았나?)",
                  fontsize=13)
@@ -1086,7 +1095,7 @@ def plot_field_evolution(df, keys, reps, fields, suptitle, outpath):
                 ax.set_title(cname, fontsize=10)
             if ci == 0:
                 ax.set_ylabel("%s\n%s" % (str(tray)[:16], ann), fontsize=8)
-            ax.set_xticks([]); ax.set_yticks([])
+            set_ab_ticks(ax, fontsize=5, every=3)
             fig.colorbar(im, ax=ax, shrink=0.7)
     fig.suptitle(suptitle, fontsize=13)
     fig.tight_layout(rect=[0, 0, 1, 0.97])
@@ -1133,13 +1142,11 @@ def detect_shared_fingerprint(df, keys, value_col, title, outpath):
     lo, hi = robust_clim(cf)
     im0 = axes[0].imshow(cf, cmap="coolwarm", origin="upper", vmin=lo, vmax=hi)
     axes[0].set_title("공통 필드 (트레이 간 중앙값 = 지문)")
-    axes[0].set_xticks([0, 11]); axes[0].set_xticklabels(["왼쪽", "오른쪽"], fontsize=8)
-    axes[0].set_yticks([0, 11]); axes[0].set_yticklabels(["위", "아래"], fontsize=8)
+    set_ab_ticks(axes[0], fontsize=7)
     fig.colorbar(im0, ax=axes[0], shrink=0.7)
     im1 = axes[1].imshow(count.reshape(GRID, GRID), cmap="viridis", origin="upper")
     axes[1].set_title("위치별 유효 트레이 수\n(코너/특정칸이 낮으면 그 칸 지문은 못 믿음)")
-    axes[1].set_xticks([0, 11]); axes[1].set_xticklabels(["왼쪽", "오른쪽"], fontsize=8)
-    axes[1].set_yticks([0, 11]); axes[1].set_yticklabels(["위", "아래"], fontsize=8)
+    set_ab_ticks(axes[1], fontsize=7)
     fig.colorbar(im1, ax=axes[1], shrink=0.7)
     axes[2].hist(cors, bins=40, color="#4c72b0")
     axes[2].axvline(np.median(cors), color="k", ls="--",
@@ -1234,7 +1241,7 @@ def plot_tray_gallery(df, keys, value_col, outdir, label, n=100, per_page=25, se
                 im = ax.imshow(grids[chunk[i]], cmap="coolwarm", origin="upper",
                                vmin=-v, vmax=v)
                 ax.set_title(str(chunk[i])[:18], fontsize=7)
-                ax.set_xticks([]); ax.set_yticks([])
+                set_ab_ticks(ax, fontsize=5, every=3)
             else:
                 ax.axis("off")
         if im is not None:
@@ -1272,8 +1279,7 @@ def rest_time_diagnostic(df, keys, outpath):
         grid[int(r), int(c)] = gg["_rest"].mean()
     im = axes[1].imshow(grid, cmap="viridis", origin="upper")
     axes[1].set_title("위치별 평균 휴지시간\n(위치 구조 있으면 측정순서 교란)")
-    axes[1].set_xticks([0, 11]); axes[1].set_xticklabels(["왼쪽", "오른쪽"], fontsize=8)
-    axes[1].set_yticks([0, 11]); axes[1].set_yticklabels(["위", "아래"], fontsize=8)
+    set_ab_ticks(axes[1], fontsize=7)
     fig.colorbar(im, ax=axes[1], shrink=0.7)
     fig.suptitle("[28] 실제 휴지시간 & ΔOCV 교란 (트레이내 상관 r=%.2f)" % corr,
                  fontsize=13)
