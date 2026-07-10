@@ -1198,6 +1198,54 @@ def fingerprint_all(df, keys, specs, outdir):
     return results
 
 
+def plot_tray_gallery(df, keys, value_col, outdir, label, n=100, per_page=25, seed=42):
+    """개별 트레이 공간필드(중앙값 제거, 공통스케일)를 랜덤 n개 그려 페이지 저장.
+    공통필드(지문)가 개별 트레이에 실제로 있는지 육안 검증용."""
+    df = df.copy()
+    df["_tray"] = keys.values
+    grids, trays = {}, []
+    for tray, g in df.groupby("_tray"):
+        grid = tray_grid(g, value_col, mask_outliers=False)
+        if np.sum(~np.isnan(grid)) < MIN_VALID_CELLS:
+            continue
+        grids[tray] = grid - np.nanmedian(grid)
+        trays.append(tray)
+    if not trays:
+        print("[갤러리] 트레이 없음 → 생략")
+        return
+    rng = np.random.RandomState(seed)
+    sel = list(rng.choice(trays, min(n, len(trays)), replace=False))
+    pooled = np.concatenate([grids[t].flatten() for t in sel])
+    pooled = pooled[np.isfinite(pooled)]
+    v = np.nanpercentile(np.abs(pooled), 95) if pooled.size else 1.0
+    v = v if v > 0 else 1.0
+
+    ncol = nrow = int(np.sqrt(per_page))
+    pages = int(np.ceil(len(sel) / per_page))
+    sub = os.path.join(outdir, "갤러리")
+    os.makedirs(sub, exist_ok=True)
+    for p in range(pages):
+        chunk = sel[p * per_page:(p + 1) * per_page]
+        fig, axes = plt.subplots(nrow, ncol, figsize=(15, 15.5))
+        im = None
+        for i in range(nrow * ncol):
+            ax = axes[i // ncol][i % ncol]
+            if i < len(chunk):
+                im = ax.imshow(grids[chunk[i]], cmap="coolwarm", origin="upper",
+                               vmin=-v, vmax=v)
+                ax.set_title(str(chunk[i])[:18], fontsize=7)
+                ax.set_xticks([]); ax.set_yticks([])
+            else:
+                ax.axis("off")
+        if im is not None:
+            fig.colorbar(im, ax=axes.ravel().tolist(), shrink=0.5)
+        fig.suptitle("[27b] 트레이별 %s 필드 (중앙값제거, 공통스케일 ±%.3f) — %d/%d페이지"
+                     % (label, v, p + 1, pages), fontsize=13)
+        fig.savefig(os.path.join(sub, "갤러리_%s_p%d.png" % (label, p + 1)), dpi=110)
+        plt.close(fig)
+    print("[갤러리] %s: 랜덤 %d트레이 %d페이지 → %s" % (label, len(sel), pages, sub))
+
+
 def rest_time_diagnostic(df, keys, outpath):
     """[28] 실제 휴지시간(OCV7→OCV1) 분포 + 위치 구조 + ΔOCV 트레이내 상관."""
     if not (df["st7_dt"].notna().any() and df["st1_dt"].notna().any()):
@@ -1448,6 +1496,8 @@ def main():
              ("온도T1", "t1"), ("온도T2", "t2"), ("온도T3", "t3"), ("냉각량", "_cool"),
              ("방전Tmax", "dis_tmax"), ("방전Tavg", "dis_tavg"), ("방전스윙", "dis_swing")],
             args.outdir)
+        # [27b] 트레이별 ΔOCV 필드 갤러리 (지문이 개별 트레이에 실재하는지 육안검증)
+        plot_tray_gallery(df, keys, "docv", args.outdir, "ΔOCV")
         # [28] 실제 휴지시간(OCV7→OCV1) 정규화 진단
         rest_time_diagnostic(df, keys,
             os.path.join(args.outdir, "28_휴지시간.png"))
@@ -1458,6 +1508,7 @@ def main():
             [("OCV1", "ocv1"), ("OCV2", "ocv2"), ("OCV3", "ocv3"), ("ΔOCV", "docv"),
              ("온도T1", "t1"), ("온도T2", "t2"), ("온도T3", "t3"), ("냉각량", "_cool")],
             args.outdir)
+        plot_tray_gallery(df, keys, "docv", args.outdir, "ΔOCV")
 
     # 냉각패턴 vs OCV패턴 겹침 (냉각이 큰 곳에서 OCV도 튀나) -----------
     merged = pd.merge(
